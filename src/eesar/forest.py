@@ -105,6 +105,12 @@ w_exportassetsname = widgets.Text(
     value='forest/',
     placeholder=' ',
     disabled=False
+)    
+w_compareassetname = widgets.Text(
+    layout = widgets.Layout(width='200px'),
+    value='forest/',
+    placeholder=' ',
+    disabled=False
 )
 w_exportscale = widgets.FloatText(
     value=10,
@@ -185,18 +191,22 @@ w_preview = widgets.Button(description="Preview",disabled=True,layout = widgets.
 w_review = widgets.Button(description="ReviewAsset",disabled=False)
 w_goto = widgets.Button(description='GoTo',disabled=False)
 w_export_ass = widgets.Button(description='ExportToAssets',disabled=True)
+w_calcloss = widgets.Button(description='CalculateLoss',disabled=True)
 w_export_drv = widgets.Button(description='ExportToDrive',disabled=True)
 w_reset = widgets.Button(description='Reset',disabled=False)
 
 w_masks = widgets.VBox([w_maskwater,w_settlement,w_forest])
 w_dates = widgets.VBox([w_startdate,w_enddate])
-w_export = widgets.VBox([widgets.HBox([w_useshape,w_county]),
-                         widgets.HBox([w_export_ass,w_exportassetsname])])
+w_export = widgets.VBox([widgets.HBox([w_useshape,w_county]),                        
+                         widgets.HBox([w_export_ass,w_exportassetsname]),
+                         widgets.HBox([w_calcloss,w_compareassetname])])
 w_signif = widgets.VBox([w_significance,w_median])
 
 def on_widget_change(b):
     w_preview.disabled = True
     w_export_ass.disabled = True
+    w_calcloss.disabled = True
+    
     
 def on_goto_button_clicked(b):
     try:
@@ -239,11 +249,13 @@ def handle_draw(self, action, geo_json):
         poly = ee.Geometry.Polygon(coords)      
         w_preview.disabled = True
         w_export_ass.disabled = True
+        w_calcloss.disabled = True
         w_export_drv.disabled = True 
     elif action == 'deleted':
         poly = None
         w_preview.disabled = True    
         w_export_ass.disabled = True
+        w_calcloss.disabled = True
         w_export_drv.disabled = True      
 
 def getS1collection():
@@ -288,16 +300,16 @@ def getEWM():
     mp = mp0.where(mp.eq(10),1).selfMask()          
     return mp.reproject(prj.atScale(scale)) 
                                             
-def getHansen(canopy=10,contiguous=9):
+def getHansen(canopy=10,contiguous=9,loss_year=1):
     gfc = ee.Image('UMD/hansen/global_forest_change_2020_v1_8')  
     treecover = gfc.select('treecover2000').clip(poly)
     lossyear = gfc.select('lossyear').clip(poly)
-    loss = lossyear.where(lossyear.gte(1),1).selfMask()
+    loss = lossyear.multiply(0).where(lossyear.gte(loss_year),1).selfMask()
     forest2000 = treecover.gte(ee.Number(canopy)).selfMask()               
     prj = forest2000.projection()
     scale = prj.nominalScale()
     mp = forest2000.connectedPixelCount(100).gte(ee.Number(contiguous)).selfMask()
-    mp = mp.where(lossyear.gte(1),0).selfMask()
+    mp = mp.where(lossyear.gte(loss_year),0).selfMask()
     return (mp.reproject(prj.atScale(scale)) , loss.reproject(prj.atScale(scale)))        
                   
 def get_vvvh(image):   
@@ -322,6 +334,8 @@ def clipList(current,prev):
     return ee.Dictionary({'imlist':imlist,'poly':poly,'enl':enl,'ctr':ctr.add(1),'stride':stride})  
 
 def clear_layers():
+    if len(m.layers)>8:
+        m.remove_layer(m.layers[8])
     if len(m.layers)>7:
         m.remove_layer(m.layers[7])
     if len(m.layers)>6:
@@ -390,6 +404,7 @@ def on_collect_button_clicked(b):
             #******************************************************************
             w_preview.disabled = False
             w_export_ass.disabled = False
+            w_calcloss.disabled = False
             w_export_drv.disabled = False
             #Display preview 
             if len(rons)==1:
@@ -419,7 +434,7 @@ def on_collect_button_clicked(b):
                     locations =  poly.coordinates().getInfo()[0]
                     locations = [tuple(list(reversed(i))) for i in locations]
                     layer = Polygon(locations=locations,
-                                color="red", 
+                                color="white", 
                                 fill_color = 'black', 
                                 name = 'County Nr. '+str(w_county.value))    
                     center = poly.centroid().coordinates().getInfo()
@@ -485,7 +500,7 @@ def on_preview_button_clicked(b):
                 print('Minimum forest area used (ha) ', minAreaUsed)
                 print('F1 score relative to Hansen ', F1)        
             elif w_changemap.value=='EWM':
-                mp = getEWM()
+                mp = getEWM().clip(poly).selfMask()
                 if w_settlement.value:              
                     mp = mp.where(settlement.eq(255),0).selfMask()     
                 palette = ggg
@@ -506,7 +521,7 @@ def on_preview_button_clicked(b):
                 print('EWM change map\nForest Cover (ha): %i'%math.trunc(forestCover.get('Map').getInfo()))
                 print('F1 score relative to Hansen ', F1)                       
             elif w_changemap.value=='PALSAR':
-                mp = getPALSAR()
+                mp = getPALSAR().clip(poly).selfMask()
                 if w_settlement.value:              
                     mp = mp.where(settlement.eq(255),0).selfMask()     
                 palette = ggg
@@ -517,17 +532,19 @@ def on_preview_button_clicked(b):
                                     scale = 30,
                                     maxPixels = 1e13)          
                 mph, _ = getHansen()
-                TP = mp.multiply(0).where(mph.eq(1).And(mp.eq(1)),1).reduceRegion(ee.Reducer.sum(),poly).get('fnf')
+                TP = mp.multiply(0).where(mph.eq(1).And(mp.eq(1)),1).reduceRegion(ee.Reducer.sum(),poly,maxPixels = 1e13).get('fnf')
                 TP = ee.Number(TP)
-                FP = mp.multiply(0).where(mph.unmask().eq(0).And(mp.eq(1)),1).reduceRegion(ee.Reducer.sum(),poly).get('fnf')
-                FN = mp.multiply(0).where(mph.eq(1).And(mp.unmask().eq(0)),1).reduceRegion(ee.Reducer.sum(),poly).get('fnf')
+                FP = mp.multiply(0).where(mph.unmask().eq(0).And(mp.eq(1)),1).reduceRegion(ee.Reducer.sum(),poly,maxPixels = 1e13).get('fnf')
+                FN = mp.multiply(0).where(mph.eq(1).And(mp.unmask().eq(0)),1).reduceRegion(ee.Reducer.sum(),poly,maxPixels = 1e13).get('fnf')
                 P = TP.divide(TP.add(FP)).getInfo() 
                 R = TP.divide(TP.add(FN)).getInfo()                
                 F1 = 2.0*P*R/(P+R)                         
                 print('PALSAR change map\nForest Cover (ha): %i'%math.trunc(forestCover.get('fnf').getInfo()))
                 print('F1 score relative to Hansen ', F1)   
             elif w_changemap.value=='Hansen':                
-                mp, loss = getHansen()       
+                mp, loss = getHansen(loss_year=19) 
+                mp = mp.clip(poly).selfMask() 
+                loss = loss.clip(poly).selfMask()     
                 palette = ggg
                 if w_settlement.value:              
                     mp = mp.where(settlement.eq(255),0).selfMask()        
@@ -617,7 +634,28 @@ def on_export_ass_button_clicked(b):
         with w_out:
             print('Error: %s'%e)                                          
     
-w_export_ass.on_click(on_export_ass_button_clicked)  
+w_export_ass.on_click(on_export_ass_button_clicked) 
+
+def on_calcloss_button_clicked(b):
+    ''' Calculate loss
+    '''
+    try:                        
+        compare_map = ee.Image('projects/ee-mortcanty/assets/'+w_compareassetname.value)
+        current_map = ee.Image('projects/ee-mortcanty/assets/'+w_exportassetsname.value)       
+        w_out.clear_output() 
+        loss_map = compare_map.multiply(0).where(compare_map.eq(1).And(current_map.unmask().eq(0)),1).selfMask()
+        with w_out:
+            print('Omnibus loss map')  
+        m.add_layer(TileLayer(url=GetTileLayerUrl(compare_map.visualize(min=0, max=1, palette='black,green')),name='compare'))
+        m.add_layer(TileLayer(url=GetTileLayerUrl(current_map.visualize(min=0, max=1, palette='black,green')),name='current'))    
+        m.add_layer(TileLayer(url=GetTileLayerUrl(loss_map.visualize(min=0, max=1, palette='black,red')),name='loss')) 
+    except Exception as e:
+        with w_out:
+            print('Error: %s'%e)                                          
+    
+w_calcloss.on_click(on_calcloss_button_clicked)   
+
+
 
 #@title Run the interface
 def run():
